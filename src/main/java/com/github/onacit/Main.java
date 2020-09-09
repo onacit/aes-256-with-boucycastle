@@ -2,6 +2,7 @@ package com.github.onacit;
 
 import lombok.extern.slf4j.Slf4j;
 import org.bouncycastle.crypto.CipherParameters;
+import org.bouncycastle.crypto.DataLengthException;
 import org.bouncycastle.crypto.PBEParametersGenerator;
 import org.bouncycastle.crypto.engines.AESEngine;
 import org.bouncycastle.crypto.generators.PKCS5S2ParametersGenerator;
@@ -10,10 +11,19 @@ import org.bouncycastle.crypto.paddings.PaddedBufferedBlockCipher;
 import org.bouncycastle.crypto.params.ParametersWithIV;
 
 import javax.crypto.Cipher;
+import javax.crypto.CipherInputStream;
+import javax.crypto.CipherOutputStream;
 import javax.crypto.SecretKeyFactory;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.SecretKeySpec;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.FilterInputStream;
+import java.io.FilterOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.lang.reflect.Field;
 import java.security.Key;
 import java.security.spec.AlgorithmParameterSpec;
 import java.security.spec.KeySpec;
@@ -75,6 +85,77 @@ public class Main {
             decLen += cipher.doFinal(decrypted, decLen);
             bcDecrypted = Arrays.copyOf(decrypted, decLen);
             assert Arrays.equals(plain, bcDecrypted);
+            {
+                // bypassing CipherOutputStream
+                final ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                final CipherOutputStream cos = new CipherOutputStream(baos, null);
+                final Field field = FilterOutputStream.class.getDeclaredField("out");
+                field.setAccessible(true);
+                final OutputStream out = (OutputStream) field.get(cos);
+                try (InputStream source = new ByteArrayInputStream(plain)) {
+                    cipher.init(true, parametersWithIV);
+                    final byte[] inbuf = new byte[128];
+                    byte[] outbuf = new byte[1];
+                    int outlen;
+                    for (int r; (r = source.read(inbuf)) != -1; ) {
+                        while (true) {
+                            try {
+                                outlen = cipher.processBytes(inbuf, 0, r, outbuf, 0);
+                                break;
+                            } catch (final DataLengthException dle) {
+                                outbuf = new byte[outbuf.length << 1];
+                            }
+                        }
+                        out.write(outbuf, 0, outlen);
+                    }
+                    while(true) {
+                        try {
+                            outlen = cipher.doFinal(outbuf, 0);
+                            break;
+                        } catch (final DataLengthException dle) {
+                            outbuf = new byte[outbuf.length << 1];
+                        }
+                    }
+                    out.write(outbuf, 0, outlen);
+                }
+                final byte[] encrypted2 = baos.toByteArray();
+                assert Arrays.equals(encrypted, encrypted2);
+            }
+            {
+                // bypassing CipherInputStream
+                final ByteArrayInputStream bais = new ByteArrayInputStream(encrypted);
+                final CipherInputStream cis = new CipherInputStream(bais, null);
+                final Field field = FilterInputStream.class.getDeclaredField("in");
+                field.setAccessible(true);
+                final InputStream in = (InputStream) field.get(cis);
+                cipher.init(false, parametersWithIV);
+                final byte[] inbuf = new byte[128];
+                byte[] outbuf = new byte[1];
+                final ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                int outlen;
+                for (int r; (r = in.read(inbuf)) != -1; ) {
+                    while (true) {
+                        try {
+                            outlen = cipher.processBytes(inbuf, 0, r, outbuf, 0);
+                            break;
+                        } catch (final DataLengthException dle) {
+                            outbuf = new byte[outbuf.length << 1];
+                        }
+                    }
+                    baos.write(outbuf, 0, outlen);
+                }
+                while (true) {
+                    try {
+                        outlen = cipher.doFinal(outbuf, 0);
+                        break;
+                    } catch (final DataLengthException dle) {
+                        outbuf = new byte[outbuf.length << 1];
+                    }
+                }
+                baos.write(outbuf, 0, outlen);
+                final byte[] decrypted2 = baos.toByteArray();
+                assert Arrays.equals(decrypted, decrypted2);
+            }
         }
 
         {
