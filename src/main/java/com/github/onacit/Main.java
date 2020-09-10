@@ -5,27 +5,17 @@ import org.bouncycastle.crypto.CipherParameters;
 import org.bouncycastle.crypto.PBEParametersGenerator;
 import org.bouncycastle.crypto.engines.AESEngine;
 import org.bouncycastle.crypto.generators.PKCS5S2ParametersGenerator;
+import org.bouncycastle.crypto.io.CipherInputStream;
 import org.bouncycastle.crypto.modes.CBCBlockCipher;
 import org.bouncycastle.crypto.paddings.PaddedBufferedBlockCipher;
 import org.bouncycastle.crypto.params.ParametersWithIV;
 
-import javax.crypto.Cipher;
-import javax.crypto.CipherInputStream;
-import javax.crypto.CipherOutputStream;
-import javax.crypto.SecretKeyFactory;
-import javax.crypto.spec.IvParameterSpec;
-import javax.crypto.spec.PBEKeySpec;
-import javax.crypto.spec.SecretKeySpec;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.FilterInputStream;
-import java.io.FilterOutputStream;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.lang.reflect.Field;
-import java.security.Key;
-import java.security.spec.AlgorithmParameterSpec;
-import java.security.spec.KeySpec;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Arrays;
 
 import static java.util.concurrent.ThreadLocalRandom.current;
@@ -33,114 +23,89 @@ import static java.util.concurrent.ThreadLocalRandom.current;
 @Slf4j
 public class Main {
 
-    private static final String ALGORITHM = "AES";
+//    private static final String ALGORITHM = "AES";
 
-    private static final String MODE = "CBC";
+//    private static final String MODE = "CBC";
 
-    private static final String PADDING = "PKCS5Padding";
+//    private static final String PADDING = "PKCS5Padding";
 
-    private static final String TRANSFORMATION = ALGORITHM + '/' + MODE + '/' + PADDING;
+//    private static final String TRANSFORMATION = ALGORITHM + '/' + MODE + '/' + PADDING;
 
-    private static final int KEY_LENGTH_IN_BYTES = 32;
+    private static final int BLOCK_SIZE = 128;
 
-    private static final int KEY_LENGTH_IN_BITS = KEY_LENGTH_IN_BYTES << 3;
+    private static final int BLOCK_SIZE_IN_BYTES = BLOCK_SIZE >> 3;
+
+    private static final int KEY_SIZE = 256;
+
+//    private static final int KEY_SIZE_IN_BYTES = KEY_SIZE >> 3;
+
+    static void encrypt(final char[] password, final byte[] salt, final int iterations, final byte[] iv,
+                        final Path source, final Path target)
+            throws Exception {
+        final PKCS5S2ParametersGenerator generator = new PKCS5S2ParametersGenerator();
+        generator.init(PBEParametersGenerator.PKCS5PasswordToBytes(password), salt, iterations);
+        final CipherParameters derivedMacParameters = generator.generateDerivedMacParameters(KEY_SIZE);
+        final PaddedBufferedBlockCipher cipher
+                = new PaddedBufferedBlockCipher(new CBCBlockCipher(new AESEngine()));
+        final CipherParameters parametersWithIV = new ParametersWithIV(derivedMacParameters, iv);
+        cipher.init(true, parametersWithIV);
+        try (InputStream is = new FileInputStream(source.toFile());
+             OutputStream os = new FileOutputStream(target.toFile());
+             org.bouncycastle.crypto.io.CipherOutputStream cos
+                     = new org.bouncycastle.crypto.io.CipherOutputStream(os, cipher)) {
+            final byte[] buffer = new byte[current().nextInt(256, 1024)];
+            for (int r; (r = is.read(buffer)) != -1; ) {
+                cos.write(buffer, 0, r);
+            }
+            cos.flush();
+        }
+    }
+
+    static void decrypt(final char[] password, final byte[] salt, final int iterations, final byte[] iv,
+                        final Path source, final Path target)
+            throws Exception {
+        final PKCS5S2ParametersGenerator generator = new PKCS5S2ParametersGenerator();
+        generator.init(PBEParametersGenerator.PKCS5PasswordToBytes(password), salt, iterations);
+        final CipherParameters derivedMacParameters = generator.generateDerivedMacParameters(KEY_SIZE);
+        final PaddedBufferedBlockCipher cipher
+                = new PaddedBufferedBlockCipher(new CBCBlockCipher(new AESEngine()));
+        final CipherParameters parametersWithIV = new ParametersWithIV(derivedMacParameters, iv);
+        cipher.init(false, parametersWithIV);
+        try (InputStream is = new FileInputStream(source.toFile());
+             CipherInputStream cis = new CipherInputStream(is, cipher);
+             OutputStream os = new FileOutputStream(target.toFile())) {
+            final byte[] buffer = new byte[current().nextInt(256, 1024)];
+            for (int r; (r = cis.read(buffer)) != -1; ) {
+                os.write(buffer, 0, r);
+            }
+            os.flush();
+        }
+    }
 
     public static void main(final String... args) throws Exception {
 
         final char[] password = "password".toCharArray();
+
         final byte[] salt = new byte[1024];
         current().nextBytes(salt);
-        final int iteration = 65536;
 
-        final byte[] ivBytes = new byte[16]; // 128, regardless of key size
-        current().nextBytes(ivBytes);
+        final int iterations = current().nextInt(65536);
 
-        final byte[] keyBytes = new byte[KEY_LENGTH_IN_BYTES]; // 256
-        current().nextBytes(keyBytes);
-
-        final byte[] plain = new byte[1048576];
-        current().nextBytes(plain);
-
-        final byte[] bcEncrypted;
-        final byte[] bcDecrypted;
-
-        final byte[] jceEncrypted;
-        final byte[] jceDecrypted;
+        final byte[] iv = new byte[BLOCK_SIZE_IN_BYTES];
+        current().nextBytes(iv);
 
         {
-            final PKCS5S2ParametersGenerator generator = new PKCS5S2ParametersGenerator();
-            generator.init(PBEParametersGenerator.PKCS5PasswordToBytes(password), salt, iteration);
-            final CipherParameters derivedMacParameters = generator.generateDerivedMacParameters(KEY_LENGTH_IN_BITS);
-            final PaddedBufferedBlockCipher cipher = new PaddedBufferedBlockCipher(new CBCBlockCipher(new AESEngine()));
-            final CipherParameters parametersWithIV = new ParametersWithIV(derivedMacParameters, ivBytes);
-            cipher.init(true, parametersWithIV);
-            final byte[] encrypted = new byte[cipher.getOutputSize(plain.length)];
-            int encLen = cipher.processBytes(plain, 0, plain.length, encrypted, 0);
-            encLen += cipher.doFinal(encrypted, encLen);
-            bcEncrypted = Arrays.copyOf(encrypted, encLen);
-            cipher.init(false, parametersWithIV);
-            final byte[] decrypted = new byte[cipher.getOutputSize(encLen)];
-            int decLen = cipher.processBytes(encrypted, 0, encLen, decrypted, 0);
-            decLen += cipher.doFinal(decrypted, decLen);
-            bcDecrypted = Arrays.copyOf(decrypted, decLen);
-            assert Arrays.equals(plain, bcDecrypted);
+            final Path plain = Files.createTempFile(null, null);
             {
-                // bypassing CipherOutputStream
-                final ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                final CipherOutputStream cos = new CipherOutputStream(baos, null);
-                final Field field = FilterOutputStream.class.getDeclaredField("out");
-                field.setAccessible(true);
-                final OutputStream out = (OutputStream) field.get(cos);
-                cipher.init(true, parametersWithIV);
-                try (InputStream source = new ByteArrayInputStream(plain);
-                     org.bouncycastle.crypto.io.CipherOutputStream target
-                             = new org.bouncycastle.crypto.io.CipherOutputStream(out, cipher)) {
-                    final byte[] buffer = new byte[current().nextInt(1, 128)];
-                    for (int r; (r = source.read(buffer)) != -1; ) {
-                        target.write(buffer, 0, r);
-                    }
-                }
-                final byte[] encrypted2 = baos.toByteArray();
-                assert Arrays.equals(encrypted, encrypted2);
+                final byte[] bytes = new byte[current().nextInt(1048576)];
+                current().nextBytes(bytes);
+                Files.write(plain, bytes);
             }
-            {
-                // bypassing CipherInputStream
-                final ByteArrayInputStream bais = new ByteArrayInputStream(encrypted);
-                final InputStream in;
-                {
-                    final CipherInputStream cis = new CipherInputStream(bais, null);
-                    final Field field = FilterInputStream.class.getDeclaredField("in");
-                    field.setAccessible(true);
-                    in = (InputStream) field.get(cis);
-                }
-                cipher.init(false, parametersWithIV);
-                final ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                try (org.bouncycastle.crypto.io.CipherOutputStream target
-                             = new org.bouncycastle.crypto.io.CipherOutputStream(baos, cipher)) {
-                    final byte[] buffer = new byte[current().nextInt(1, 128)];
-                    for (int r; (r = in.read(buffer)) != -1; ) {
-                        target.write(buffer, 0, r);
-                    }
-                }
-                final byte[] decrypted2 = baos.toByteArray();
-                assert Arrays.equals(decrypted, decrypted2);
-            }
+            final Path encrypted = Files.createTempFile(null, null);
+            encrypt(password, salt, iterations, iv, plain, encrypted);
+            final Path decrypted = Files.createTempFile(null, null);
+            decrypt(password, salt, iterations, iv, encrypted, decrypted);
+            assert Arrays.equals(Files.readAllBytes(plain), Files.readAllBytes(decrypted));
         }
-
-        {
-            final SecretKeyFactory secretKeyFactory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA1");
-            final KeySpec keySpec = new PBEKeySpec(password, salt, iteration, KEY_LENGTH_IN_BITS);
-            final Key key = new SecretKeySpec(secretKeyFactory.generateSecret(keySpec).getEncoded(), ALGORITHM);
-            final Cipher cipher = Cipher.getInstance(TRANSFORMATION);
-            final AlgorithmParameterSpec algorithmParameterSpec = new IvParameterSpec(ivBytes);
-            cipher.init(Cipher.ENCRYPT_MODE, key, algorithmParameterSpec);
-            jceEncrypted = cipher.doFinal(plain);
-            cipher.init(Cipher.DECRYPT_MODE, key, algorithmParameterSpec);
-            jceDecrypted = cipher.doFinal(jceEncrypted);
-            assert Arrays.equals(plain, jceDecrypted);
-        }
-
-        assert Arrays.equals(bcEncrypted, jceEncrypted);
-        assert Arrays.equals(bcDecrypted, jceDecrypted);
     }
 }
